@@ -1,1 +1,2 @@
-Implementation of tacotron
+# Tacotron
+Implementation of tacotron in PyTorch

@@ -64,7 +64,7 @@ class TextModel:
         """
         idx = torch.LongTensor(self.tokenizer.get_idx_from_string(text))
         # expand batch dim
-        embedding = self.embedding[idx]
+        embedding = self.embedding(idx)
         if expand_dim:
             embedding = embedding.unsqueeze(0)
         return embedding

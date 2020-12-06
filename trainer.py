@@ -74,7 +74,7 @@ class TacotronTrainer:
     def __init__(self,
                  batch_size: int = 32,
                  num_epoch: int = 100,
-                 train_split: float = 0.8,
+                 train_split: float = 0.9,
                  log_interval: int = 1000,
                  log_audio_factor: int = 5,
                  num_data: int = None,
@@ -125,11 +125,10 @@ class TacotronTrainer:
 
         self.loss = TacotronLoss()
         self.optimizer = Adam(self.tacotron.nn.parameters())
-        self.lr_scheduler = MultiStepLR(
+        self.lr_scheduler = StepLR(
             optimizer=self.optimizer,
-            milestones=[int(5e5), int(1e6), int(2e6)],
-            gamma=0.5
-        )
+            step_size=10000,
+            gamma=0.9)
 
         if version is None:
             versions = os.listdir(log_root)
@@ -335,11 +334,8 @@ class TacotronTrainer:
 
                 taco_output = self.tacotron.forward_train(datapoint)
 
-                spec = AudioProcessingHelper.log2lin(
-                    taco_output.pred_lin_spec.squeeze(0).cpu().numpy()).T
-
-                pred_audio = AudioProcessingHelper.spec2audio(
-                    spec, enhancement_factor=1.5, normalize=True)
+                spec = taco_output.pred_lin_spec.squeeze(0).cpu().numpy().T
+                pred_audio = AudioProcessingHelper.spec2audio(spec)
 
                 test_insts.append(
                     SampleResult(
@@ -494,11 +490,13 @@ if __name__ == '__main__':
 
     p.add_argument('--num_workers', type=int, default=4)
     p.add_argument('--log_interval', type=int, default=1000)
-    p.add_argument('--num_epoch', type=int, default=500)
+    p.add_argument('--num_epoch', type=int, default=250)
+    p.add_argument('--batch_size', type=int, default=32)
     args = p.parse_args()
 
     trainer = TacotronTrainer(num_workers=args.num_workers,
                               log_interval=args.log_interval,
-                              num_epoch=args.num_epoch)
+                              num_epoch=args.num_epoch,
+                              batch_size=args.batch_size)
     # trainer = TacotronTrainer(num_data=32*10, log_interval=10, log_audio_factor=1, num_workers=args.num_workers)
     trainer.fit()

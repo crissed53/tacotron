@@ -6,6 +6,7 @@ from typing import Union, List, Tuple
 
 import librosa
 import numpy as np
+import scipy.signal
 
 
 @dataclass(frozen=True)
@@ -18,6 +19,8 @@ class AudioProcessParam:
     hop_length: int = 256
     window_type: int = 'hann'
     n_mels: int = 80
+    min_level_db: int = -100
+    ref_level_db: int = 20
 
 
 @dataclass
@@ -41,47 +44,65 @@ class AudioProcessingHelper:
         """Load audio from an audio file. Pre-emphasize"""
         y, sr = librosa.load(audio_file, sr=cls.param.sr, mono=True)
         if pre_emphasize:
-            y = librosa.effects.preemphasis(y, coef=cls.param.pre_emph_coef)
+            y = cls.pre_emphasize(y)
         return y
 
     @classmethod
+    def pre_emphasize(cls, x: np.ndarray, emphasis_factor: float = 0.97):
+        return scipy.signal.lfilter([1, -emphasis_factor], [1], x)
+
+    @classmethod
+    def de_emphasize(cls, x: np.ndarray, emphasis_factor: float = 0.97):
+        return scipy.signal.lfilter([1], [1, -emphasis_factor], x)
+
+    @classmethod
     def audio2spec(cls, y: np.ndarray) -> np.ndarray:
-        """Convert a PCM data into spectrogram"""
+        """Convert a PCM data into magnitude spectrogram"""
         lin_stft = librosa.stft(y, n_fft=cls.param.n_fft,
                                 hop_length=cls.param.hop_length,
                                 window=cls.param.window_type)
-        return np.abs(lin_stft) ** 2
+        return np.abs(lin_stft)
 
     @classmethod
-    def lin2log(cls, spec: np.ndarray) -> np.ndarray:
+    def lin2db(cls, spec: np.ndarray) -> np.ndarray:
         """Converts linear spectrogram into log spectrogram. Clip the
         spectrogram value less than 1e-7 to avoid taking log of zero"""
-        return np.log10(np.clip(spec, a_min=1e-7, a_max=None))
+        return 20 * np.log10(np.clip(spec, a_min=1e-5, a_max=None))
 
     @classmethod
     def spec2mel_spec(cls, spec: np.ndarray) -> np.ndarray:
-        """Converts spectrogram into mel spectrogram"""
-        return np.dot(cls.mel_filter, spec)
+        """Converts magnitude spectrogram into mel spectrogram"""
+        # power of 2, as the mel filter maps into power spectrum
+        return np.dot(cls.mel_filter, spec ** 2)
 
     @classmethod
-    def log2lin(cls, log_spec: np.ndarray) -> np.ndarray:
+    def db2lin(cls, log_spec: np.ndarray) -> np.ndarray:
         """Converts log spectrogram into spectrogram"""
-        return np.power(10, log_spec)
+        return np.power(10.0, log_spec / 20)
 
     @classmethod
     def spec2audio(cls, spec: np.ndarray, n_iter: int = 60,
-                   enhancement_factor: float = 1.5,
-                   normalize: bool = True) -> np.ndarray:
+                   enhancement_factor: float = 1.5) -> np.ndarray:
         """Converts magnitude spectrogram into a waveform using Griffin-Lim
         algorithm and istft"""
-        stft = np.power(spec, 0.5)  # Power to magnitude
-        stft = np.power(stft, enhancement_factor)  # enhance
-        waveform = librosa.griffinlim(stft, n_iter=n_iter,
+        spec = cls.denormalize(spec)
+        spec = cls.db2lin(spec + AudioProcessParam.ref_level_db)
+        spec = np.power(spec, enhancement_factor)  # enhance
+        waveform = librosa.griffinlim(spec, n_iter=n_iter,
                                       hop_length=cls.param.hop_length)
-        if normalize:
-            waveform = waveform / max(0.01, np.max(np.abs(waveform)))
+        # TODO: de-emphasize the waveform?
+        return cls.de_emphasize(waveform)
 
-        return waveform
+    @classmethod
+    def normalize(cls, spec: np.ndarray):
+        spec = spec - AudioProcessParam.min_level_db
+        spec = spec / - AudioProcessParam.min_level_db
+        return np.clip(spec, 0, 1)
+
+    @classmethod
+    def denormalize(cls, spec: np.ndarray):
+        spec = np.clip(spec, 0, 1) * -AudioProcessParam.min_level_db
+        return spec + AudioProcessParam.min_level_db
 
     @classmethod
     def audio_file_to_specs(cls, audio_file: str,
@@ -92,8 +113,11 @@ class AudioProcessingHelper:
         y = cls.load_audio(audio_file, pre_emphasize)
         spec = cls.audio2spec(y)
 
-        log_lin_spec = cls.lin2log(spec)
+        log_lin_spec = cls.lin2db(spec) - AudioProcessParam.ref_level_db
+        log_lin_spec = cls.normalize(log_lin_spec)
+
         mel_spec = cls.spec2mel_spec(spec)
-        log_mel_spec = cls.lin2log(mel_spec)
+        log_mel_spec = cls.lin2db(mel_spec) - AudioProcessParam.ref_level_db
+        log_mel_spec = cls.normalize(log_mel_spec)
 
         return SpecData(id, log_lin_spec, log_mel_spec)

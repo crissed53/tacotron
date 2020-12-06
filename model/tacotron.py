@@ -189,24 +189,31 @@ class TacotronModel(nn.Module):
         encoder_states = self.encoder(x)
 
         go_frame = self.get_go_frame(x.shape[0]).to(x.device)
+        reference_input = torch.cat([go_frame, mel_spec], dim=1)
+        last_frame = go_frame
 
-        # Input to decoder is <GO> frame and every r-th frame of the ground
-        # truth mel spectrogram
-        decoder_input = torch.cat(
-            [go_frame, mel_spec[:, self.r-1::self.r]], dim=1)
-        decoder_output = self.decoder.forward(decoder_input, encoder_states)
+        pred_mel_spec = []
+        attention_weights = []
 
-        # since prediction from last frame can cause redundant predictions,
-        # discard them if needed
-        len_residue = self.r - (mel_spec.shape[1] % self.r)
-        decoder_output.pred_mel_spec = decoder_output.pred_mel_spec[:, :-len_residue]
+        # while frame_count < mel_spec.size(1):
+        for i in range(mel_spec.size(1) // self.r + 1):
+            decoder_output = self.decoder.forward(last_frame, encoder_states)
+            pred_mel_spec.append(decoder_output.pred_mel_spec)
+            attention_weights.append(decoder_output.attention_weight)
+
+            last_frame = reference_input[:, i * self.r].unsqueeze(1)
+
+        # concatenate the predicted frames along decoder seq axis
+        pred_mel_spec = torch.cat(pred_mel_spec, dim=1)
+        attention_weights = torch.cat(attention_weights, dim=1)
+
+        pred_mel_spec = pred_mel_spec[:, :mel_spec.size(1)]
+        attention_weights = attention_weights[:, :mel_spec.size(1)]
 
         pred_lin_spec = self.fc_lin_spec_target(
-            self.cbhg(decoder_output.pred_mel_spec))
+            self.cbhg(pred_mel_spec))
 
-        return TacotronOutput(pred_lin_spec=pred_lin_spec,
-                              pred_mel_spec=decoder_output.pred_mel_spec,
-                              attention_weight=decoder_output.attention_weight)
+        return TacotronOutput(pred_lin_spec, pred_mel_spec, attention_weights)
 
 
 class TacotronEncoder(nn.Module):

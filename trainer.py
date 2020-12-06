@@ -69,7 +69,7 @@ class TacotronTrainer:
     TRAIN_STAGE = 'train'
     VAL_STAGE = 'val'
     VERSION_FORMAT = 'VERSION_{}'
-    MODEL_SAVE_FORMAT = 'version_{version:03}_model_{epoch:04}.pth'
+    MODEL_SAVE_FORMAT = 'version_{version:03}_model_{step:010}.pth'
 
     def __init__(self,
                  batch_size: int = 32,
@@ -77,6 +77,7 @@ class TacotronTrainer:
                  train_split: float = 0.9,
                  log_interval: int = 1000,
                  log_audio_factor: int = 5,
+                 lr: float = 0.001,
                  num_data: int = None,
                  log_root: str = './tb_logs',
                  save_root: str = './checkpoints',
@@ -124,7 +125,7 @@ class TacotronTrainer:
         self.tacotron.to(self.device)
 
         self.loss = TacotronLoss()
-        self.optimizer = Adam(self.tacotron.nn.parameters())
+        self.optimizer = Adam(self.tacotron.parameters(), lr=lr)
         self.lr_scheduler = StepLR(
             optimizer=self.optimizer,
             step_size=10000,
@@ -157,6 +158,10 @@ class TacotronTrainer:
 
         self.sample_indices = list(range(num_test_samples))
 
+    def fit_from_checkpoint(self, checkpoint_file: str):
+        self.tacotron.load(checkpoint_file, self.device)
+        self.fit()
+
     def fit(self):
         for epoch in tqdm.tqdm(range(self.epoch_num),
                                total=self.epoch_num,
@@ -183,20 +188,14 @@ class TacotronTrainer:
                      for stage in self.running_loss}
         self.logger.add_scalars('loss', loss_dict, global_step=epoch)
 
-        # save model for each
-        save_file = os.path.join(
-            self.save_root,
-            self.MODEL_SAVE_FORMAT.format(version=self.version, epoch=epoch)
-        )
-        self.tacotron.save(save_file, self.device)
 
     def __run_step(self, batch: TorchLJSpeechBatch, stage: str,
                    prog_bar: tqdm.tqdm):
         if stage == self.TRAIN_STAGE:
-            self.tacotron.nn.train()
+            self.tacotron.train()
             self.optimizer.zero_grad()
         else:
-            self.tacotron.nn.eval()
+            self.tacotron.eval()
 
         batch = batch.to(self.device)
 
@@ -211,7 +210,6 @@ class TacotronTrainer:
             loss_val.backward()
             self.optimizer.step()
             self.lr_scheduler.step()
-            self.global_step += 1
 
             if self.global_step % self.log_interval == 0:
                 self.logger.add_scalar('training_loss',
@@ -224,6 +222,16 @@ class TacotronTrainer:
                 for sample_result in sample_results:
                     self.__log_sample_results(
                         self.global_step, sample_result, log_audio=log_audio)
+
+                self.tacotron.train()
+                save_file = os.path.join(
+                    self.save_root,
+                    self.MODEL_SAVE_FORMAT.format(
+                        version=self.version, step=self.global_step)
+                )
+                torch.save(self.tacotron.state_dict(), save_file)
+
+            self.global_step += 1
 
         prog_bar.update()
         prog_bar.set_postfix(
@@ -313,7 +321,7 @@ class TacotronTrainer:
 
         """
         val_dataset = self.splitted_dataset[self.VAL_STAGE]
-        self.tacotron.nn.eval()
+        self.tacotron.eval()
 
         test_insts = []
         with torch.no_grad():
@@ -492,11 +500,17 @@ if __name__ == '__main__':
     p.add_argument('--log_interval', type=int, default=1000)
     p.add_argument('--num_epoch', type=int, default=250)
     p.add_argument('--batch_size', type=int, default=32)
+    p.add_argument('--checkpoint_file', type=str, default=None)
+    p.add_argument('--lr', type=float, default=0.001)
     args = p.parse_args()
 
     trainer = TacotronTrainer(num_workers=args.num_workers,
                               log_interval=args.log_interval,
                               num_epoch=args.num_epoch,
-                              batch_size=args.batch_size)
+                              batch_size=args.batch_size,
+                              lr=args.lr)
+    if args.checkpoint_file:
+        trainer.fit_from_checkpoint(checkpoint_file=args.checkpoint_file)
+    else:
     # trainer = TacotronTrainer(num_data=32*10, log_interval=10, log_audio_factor=1, num_workers=args.num_workers)
-    trainer.fit()
+        trainer.fit()

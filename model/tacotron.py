@@ -10,7 +10,8 @@ import torch.nn as nn
 from torch.nn.utils.rnn import pack_padded_sequence
 
 from .module import Cbhg, PreNet, DecoderRnn, ContentBasedAttention, SeqModule
-from data.text import TextModel
+from data import METADATA_FILE
+from data.text import tokenize_transcription
 from data.audio import AudioProcessParam, AudioProcessingHelper
 from data.torch import TorchLJSpeechBatch
 
@@ -28,53 +29,68 @@ class TacotronOutput:
     attention_weight: torch.Tensor
 
 
-class Tacotron:
+class Tacotron(nn.Module):
     """The architecture of Tacotron consisting of text model, neural network,
     and reconstruction module from predicted linear spectrogram"""
     def __init__(self, r: int = 2, embedding_dim: int = 256):
+        super(Tacotron, self).__init__()
         self.nn = TacotronModel(r, embedding_dim)
-        self.text_model = TextModel(embedding_dim=embedding_dim)
+        self.tokenizer = tokenize_transcription(
+            METADATA_FILE, init_with_basic_letters=True)
+        self.embedding = nn.Embedding(num_embeddings=len(self.tokenizer),
+                                      embedding_dim=embedding_dim,
+                                      padding_idx=None)
 
-    def to(self, device: torch.device) -> None:
-        self.nn = self.nn.to(device)
-        self.text_model.embedding = self.text_model.embedding.to(device)
+    def load(self, checkpoint_path: str, device: torch.device = None):
+        if device is None:
+            device = torch.device('cpu')
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        self.load_state_dict(checkpoint)
 
-    def save(self, save_file: str, device: torch.device) -> None:
-        torch.save(
-            {'model_state_dict': self.nn.cpu().state_dict(),
-             'embedding': self.text_model.embedding.cpu().state_dict()
-             }, save_file
-        )
+    def embedding_from_text(self, text: str,
+                            expand_dim: bool = False) -> torch.FloatTensor:
+        """
+        Create character embeddings from a text
+        Args:
+            text: text to convert to the embeddings
+            expand_dim: if set True, expand dimension of the resulting tensor
+                along the batch dimension
 
-        self.nn.to(device)
-        self.text_model.embedding.to(device)
+        Returns:
 
-    def load(self, save_file: str,
-             device: torch.device = torch.device('cpu')) -> None:
-        checkpoint = torch.load(save_file, map_location=device)
-        self.nn.load_state_dict(checkpoint['model_state_dict'])
-        self.text_model.embedding.load_state_dict(checkpoint['embedding'])
+        """
+        idx = torch.LongTensor(self.tokenizer.get_idx_from_string(text))
+        # expand batch dim
+        embedding = self.embedding(idx)
+        if expand_dim:
+            embedding = embedding.unsqueeze(0)
+        return embedding
 
     def text2taco_output(self, text: str) -> TacotronOutput:
         """Converts a text to Tacotron Output"""
+        self.eval()
         text = text.lower()
-        char_embedding = self.text_model.embedding_from_text(
+        char_embedding = self.embedding_from_text(
             text, expand_dim=True)
         return self.forward_inference(char_embedding)
 
     def text2audio(self, text: str) -> np.ndarray:
+        self.eval()
         output = self.text2taco_output(text)
-        lin_spec = output.pred_lin_spec.cpu().numpy()
+        lin_spec = output.pred_lin_spec.squeeze(0).cpu().numpy().T
         return AudioProcessingHelper.spec2audio(lin_spec)
 
     def forward_train(self, batch_data: TorchLJSpeechBatch) -> TacotronOutput:
-        embedding = self.text_model.embedding(batch_data.emb_idx)
+        embedding = self.embedding(batch_data.emb_idx)
         return self.nn.forward(embedding, batch_data.mel_spec)
 
+    def forward(self, batch_data: TorchLJSpeechBatch):
+        return self.forward_train(batch_data)
+
     def forward_inference(self, x: torch.Tensor,
-                          low_amp_thres: float = -10,
-                          stop_low_energy_count: int = 40,
-                          max_frame_len: int = 180) -> TacotronOutput:
+                          low_amp_thres: float = 0.1,
+                          stop_low_energy_count: int = 50,
+                          max_frame_len: int = 500) -> TacotronOutput:
         """
         Forward pass for Tacotron at inference stage
         Args:
@@ -96,37 +112,32 @@ class Tacotron:
             last_frame = go_frame
 
             low_amp_count = 0
-            pred_mel_spec = []
-            attention_weights = []
             frame_count = 0
             while (low_amp_count < stop_low_energy_count
                    and frame_count < max_frame_len):
                 decoder_output = self.nn.decoder.forward(
                     last_frame, encoder_states)
                 pred_mel_frames = decoder_output.pred_mel_spec
-                pred_mel_spec.append(pred_mel_frames)
 
-                attention_weights.append(decoder_output.attention_weight)
+                last_frame = torch.cat(
+                    [last_frame, pred_mel_frames[:, -1].unsqueeze(1)], dim=1)
 
-                last_frame = pred_mel_frames[:, -1].unsqueeze(1)
-
-                frame_count += pred_mel_frames.size()[1]
+                frame_count += self.nn.r
 
                 avg_amp = torch.mean(pred_mel_frames).item()
-                if avg_amp < low_amp_thres:
-                    # add r
-                    low_amp_count += pred_mel_frames.size()[1]
-                else:
-                    low_amp_count = 0
+                # if avg_amp < low_amp_thres:
+                #     # add r
+                #     low_amp_count += self.nn.r
+                # else:
+                #     low_amp_count = 0
 
-            pred_mel_spec = torch.cat(pred_mel_spec, dim=1)
-            if frame_count < max_frame_len:
-                # concatenate the predicted frames while
-                # discarding low energy content
-                pred_mel_spec = pred_mel_spec[:, :-low_amp_count]
-
-            # concatenate the predicted frames along decoder seq axis
-            attention_weight = torch.cat(attention_weights, dim=1)
+            pred_mel_spec = decoder_output.pred_mel_spec
+            attention_weight = decoder_output.attention_weight
+            # if frame_count < max_frame_len:
+            #     # concatenate the predicted frames while
+            #     # discarding low energy content
+            #     pred_mel_spec = pred_mel_spec[:, :-low_amp_count]
+            #     attention_weight = attention_weight[:, :-low_amp_count]
 
             pred_lin_spec = self.nn.fc_lin_spec_target(
                 self.nn.cbhg(pred_mel_spec))

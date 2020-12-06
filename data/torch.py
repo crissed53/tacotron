@@ -50,7 +50,8 @@ class TorchLJSpeechData:
 
 
 class TorchLJSpeechDataset(Dataset):
-    tokenizer = tokenize_transcription(METADATA_FILE)
+    tokenizer = tokenize_transcription(
+        METADATA_FILE, init_with_basic_letters=True)
     spec_filename_format = '{}.npy'
 
     def __init__(self, num_data: int = None):

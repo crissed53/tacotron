@@ -42,34 +42,6 @@ class CharTokenizer:
         return [self.ctoi.get(char, self.unk_idx) for char in string]
 
 
-class TextModel:
-    """Model for exchanging text input into embedding for Tacotron"""
-    def __init__(self, embedding_dim: int = 256):
-        self.tokenizer = tokenize_transcription(METADATA_FILE)
-        self.embedding = nn.Embedding(num_embeddings=len(self.tokenizer),
-                                      embedding_dim=embedding_dim,
-                                      padding_idx=self.tokenizer.pad_idx)
-
-    def embedding_from_text(self, text: str,
-                            expand_dim: bool = False) -> torch.FloatTensor:
-        """
-        Create character embeddings from a text
-        Args:
-            text: text to convert to the embeddings
-            expand_dim: if set True, expand dimension of the resulting tensor
-                along the batch dimension
-
-        Returns:
-
-        """
-        idx = torch.LongTensor(self.tokenizer.get_idx_from_string(text))
-        # expand batch dim
-        embedding = self.embedding(idx)
-        if expand_dim:
-            embedding = embedding.unsqueeze(0)
-        return embedding
-
-
 def decode_single_line(line: str, normalized: bool = True) -> TextData:
     """Decode a single line of metadata.csv"""
     uid, trs, n_trs = line.strip().split('|')
@@ -78,9 +50,13 @@ def decode_single_line(line: str, normalized: bool = True) -> TextData:
 
 
 def tokenize_transcription(
-        metadata_file: str, normalized: bool = True) -> CharTokenizer:
+        metadata_file: str, normalized: bool = True,
+        init_with_basic_letters: bool = False) -> CharTokenizer:
     """Tokenize all the transcriptions in characters"""
-    tokenizer = CharTokenizer(init_with_basic_letters=False)
+    tokenizer = CharTokenizer(init_with_basic_letters=init_with_basic_letters)
+
+    if init_with_basic_letters:
+        return tokenizer
 
     with open(metadata_file) as meta_file:
         for line in meta_file:
